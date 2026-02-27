@@ -8,6 +8,9 @@
       <div class="small" v-if="routeInfo">
         Distance: {{ (routeInfo.distance / 1000).toFixed(2) }} km · Duration: {{ (routeInfo.duration / 60).toFixed(0) }} min
       </div>
+      <div v-if="routeError" class="error-banner" role="status" aria-live="polite">
+        {{ routeError }}
+      </div>
     </header>
 
     <div ref="mapContainer" class="map"></div>
@@ -27,6 +30,7 @@ let map: Map | null = null
 const start = ref<LngLat | null>(null)
 const dest = ref<LngLat | null>(null)
 const routeInfo = ref<RouteInfo | null>(null)
+const routeError = ref<string | null>(null)
 
 const OSRM_BASE = 'https://router.project-osrm.org'
 const PROFILE = 'driving' // reliable; later you can try 'walking' with your own OSRM instance
@@ -180,6 +184,7 @@ if (!map.getSource(SRC_NODES)) {
 function resetAll() {
   start.value = null
   dest.value = null
+  routeError.value = null
   setPoints()
   clearRoute()
   clearDecisionNodes()
@@ -231,6 +236,7 @@ onMounted(() => {
       dest.value = p
       setPoints()
       clearRoute()
+      routeError.value = null
 
       try {
         const { routeFeature, decisionNodes } = await fetchRoute(start.value, dest.value)
@@ -239,7 +245,7 @@ onMounted(() => {
         fitToLineCoords(routeFeature.geometry.coordinates)
       } catch (err: any) {
         console.error(err)
-        alert(`Routing failed: ${err?.message ?? err}`)
+        routeError.value = 'Unable to calculate a route right now. Please try again.'
         clearRoute()
         clearDecisionNodes()
       }
@@ -281,6 +287,15 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #444;
   margin-top: 6px;
+}
+.error-banner {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #7a1f1f;
+  background: #fce8e8;
+  border: 1px solid #f2bcbc;
+  border-radius: 4px;
 }
 .map {
   flex: 1;
