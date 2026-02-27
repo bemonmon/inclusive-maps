@@ -17,9 +17,38 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import maplibregl, { type GeoJSONSource, type Map } from 'maplibre-gl'
+import type { Feature, FeatureCollection, LineString, Point } from 'geojson'
 
 type LngLat = { lng: number; lat: number }
 type RouteInfo = { distance: number; duration: number }
+type PointRole = 'start' | 'dest'
+type PointFeature = Feature<Point, { role: PointRole }>
+type PointFeatureCollection = FeatureCollection<Point, { role: PointRole }>
+type RouteFeature = Feature<LineString, RouteInfo>
+type DecisionNodeFeature = Feature<Point, { idx: number }>
+type DecisionNodeCollection = FeatureCollection<Point, { idx: number }>
+type CoordinatePair = [number, number]
+
+interface OsrmStep {
+  maneuver?: {
+    location?: CoordinatePair
+  }
+}
+
+interface OsrmRoute {
+  geometry?: {
+    coordinates?: number[][]
+  }
+  distance: number
+  duration: number
+  legs?: Array<{
+    steps?: OsrmStep[]
+  }>
+}
+
+interface OsrmRouteResponse {
+  routes?: OsrmRoute[]
+}
 
 const mapContainer = ref<HTMLDivElement | null>(null)
 let map: Map | null = null
@@ -38,8 +67,8 @@ const LYR_ROUTE = 'route-layer'
 const SRC_NODES = 'decision-nodes-src'
 const LYR_NODES = 'decision-nodes-layer'
 
-function makePointsFC() {
-  const features: any[] = []
+function makePointsFC(): PointFeatureCollection {
+  const features: PointFeature[] = []
   if (start.value) {
     features.push({
       type: 'Feature',
@@ -59,34 +88,38 @@ function makePointsFC() {
 
 function setPoints() {
   const src = map?.getSource(SRC_POINTS) as GeoJSONSource | undefined
-  src?.setData(makePointsFC() as any)
+  src?.setData(makePointsFC())
 }
 
 function clearRoute() {
   const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
-  src?.setData({ type: 'FeatureCollection', features: [] } as any)
+  const emptyRouteCollection: FeatureCollection<LineString> = { type: 'FeatureCollection', features: [] }
+  src?.setData(emptyRouteCollection)
   routeInfo.value = null
 }
 function clearDecisionNodes() {
   const src = map?.getSource(SRC_NODES) as GeoJSONSource | undefined
-  src?.setData({ type: 'FeatureCollection', features: [] } as any)
+  const emptyDecisionNodes: DecisionNodeCollection = { type: 'FeatureCollection', features: [] }
+  src?.setData(emptyDecisionNodes)
 }
 
-function setDecisionNodes(points: Array<[number, number]>) {
-  const features = points.map((c, idx) => ({
+function setDecisionNodes(points: CoordinatePair[]) {
+  const features: DecisionNodeFeature[] = points.map((c, idx) => ({
     type: 'Feature',
     properties: { idx },
     geometry: { type: 'Point', coordinates: c }
   }))
   const src = map?.getSource(SRC_NODES) as GeoJSONSource | undefined
-  src?.setData({ type: 'FeatureCollection', features } as any)
+  const collection: DecisionNodeCollection = { type: 'FeatureCollection', features }
+  src?.setData(collection)
 }
-function setRoute(feature: any) {
+function setRoute(feature: Feature<LineString>) {
   const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
-  src?.setData({ type: 'FeatureCollection', features: [feature] } as any)
+  const collection: FeatureCollection<LineString> = { type: 'FeatureCollection', features: [feature] }
+  src?.setData(collection)
 }
 
-function fitToLineCoords(coords: number[][]) {
+function fitToLineCoords(coords: [number, number][]) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const [x, y] of coords) {
     minX = Math.min(minX, x)
@@ -102,25 +135,32 @@ async function fetchRoute(a: LngLat, b: LngLat) {
 
   const res = await fetch(url)
   if (!res.ok) throw new Error(`OSRM error: ${res.status}`)
-  const data = await res.json()
+  const data: OsrmRouteResponse = await res.json()
   const r = data?.routes?.[0]
   if (!r?.geometry?.coordinates) throw new Error('No route returned')
+  const routeCoords = r.geometry.coordinates.filter(
+    (coord): coord is CoordinatePair => Array.isArray(coord) && coord.length === 2
+  )
+  if (!routeCoords.length) throw new Error('No route returned')
 
   routeInfo.value = { distance: r.distance, duration: r.duration }
 
   // Decision nodes = maneuver points (one per step)
   const steps = data?.routes?.[0]?.legs?.[0]?.steps ?? []
-  const decisionNodes: Array<[number, number]> = steps
-    .map((s: any) => s?.maneuver?.location)
-    .filter((loc: any) => Array.isArray(loc) && loc.length === 2)
+  const decisionNodes: CoordinatePair[] = steps
+    .map((s) => s?.maneuver?.location)
+    .filter((loc): loc is CoordinatePair => Array.isArray(loc) && loc.length === 2)
+
+  const routeFeature: RouteFeature = {
+    type: 'Feature',
+    properties: { distance: r.distance, duration: r.duration },
+    geometry: { type: 'LineString', coordinates: routeCoords }
+  }
 
   return {
-    routeFeature: {
-      type: 'Feature',
-      properties: { distance: r.distance, duration: r.duration },
-      geometry: r.geometry
-    },
-    decisionNodes
+    routeFeature,
+    decisionNodes,
+    routeCoords
   }
 }
 
@@ -233,10 +273,10 @@ onMounted(() => {
       clearRoute()
 
       try {
-        const { routeFeature, decisionNodes } = await fetchRoute(start.value, dest.value)
+        const { routeFeature, decisionNodes, routeCoords } = await fetchRoute(start.value, dest.value)
         setRoute(routeFeature)
         setDecisionNodes(decisionNodes)
-        fitToLineCoords(routeFeature.geometry.coordinates)
+        fitToLineCoords(routeCoords)
       } catch (err: any) {
         console.error(err)
         alert(`Routing failed: ${err?.message ?? err}`)
