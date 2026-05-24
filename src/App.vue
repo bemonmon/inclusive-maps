@@ -1,236 +1,788 @@
 <template>
   <div class="app">
-    <header class="topbar">
-      <div class="title">Inclusive Maps (Open-source stack)</div>
-      <div class="hint">
-        Click map: <b>Start</b> → <b>Destination</b> → route draws. Third click resets.
-      </div>
-      <div class="small" v-if="routeInfo">
-        Distance: {{ (routeInfo.distance / 1000).toFixed(2) }} km · Duration: {{ (routeInfo.duration / 60).toFixed(0) }} min
-      </div>
-      <div v-if="routeError" class="error-banner" role="status" aria-live="polite">
-        {{ routeError }}
-      </div>
-    </header>
 
+    <!-- Address Search Panel -->
+    <div class="search-panel" :class="{ collapsed: searchCollapsed }">
+      <button class="search-toggle" @click="searchCollapsed = !searchCollapsed">
+        {{ searchCollapsed ? '🔍 Cerca' : '✕' }}
+      </button>
+
+      <div class="search-body" v-show="!searchCollapsed">
+        <div class="search-field">
+          <label>Da</label>
+          <div class="search-input-wrap">
+            <input
+              v-model="originQuery"
+              placeholder="La tua posizione o indirizzo…"
+              @input="onOriginInput"
+              @focus="activeField = 'origin'"
+              autocomplete="off"
+            />
+            <button
+              v-if="originQuery"
+              class="clear-btn"
+              @click="originQuery = ''; originSuggestions = []"
+            >✕</button>
+          </div>
+          <ul v-if="activeField === 'origin' && originSuggestions.length" class="suggestions">
+            <li
+              v-for="s in originSuggestions"
+              :key="s.place_id"
+              @mousedown.prevent="selectOrigin(s)"
+            >
+              {{ s.display_name }}
+            </li>
+          </ul>
+        </div>
+
+        <div class="search-field">
+          <label>A</label>
+          <div class="search-input-wrap">
+            <input
+              v-model="destQuery"
+              placeholder="Indirizzo di destinazione…"
+              @input="onDestInput"
+              @focus="activeField = 'dest'"
+              autocomplete="off"
+            />
+            <button
+              v-if="destQuery"
+              class="clear-btn"
+              @click="destQuery = ''; destSuggestions = []"
+            >✕</button>
+          </div>
+          <ul v-if="activeField === 'dest' && destSuggestions.length" class="suggestions">
+            <li
+              v-for="s in destSuggestions"
+              :key="s.place_id"
+              @mousedown.prevent="selectDest(s)"
+            >
+              {{ s.display_name }}
+            </li>
+          </ul>
+        </div>
+
+        <button
+          class="btn primary wide go-btn"
+          :disabled="!searchOrigin || !searchDest"
+          @click="routeFromSearch"
+        >
+          Indicazioni
+        </button>
+      </div>
+    </div>
+
+    <!-- Map -->
     <div ref="mapContainer" class="map"></div>
+
+    <!-- Top navigation bar -->
+    <div v-if="routeInfo" class="nav-top" :class="{ 'nav-below-search': searchCollapsed }">
+      <div class="nav-top-inner">
+        <div class="nav-arrow">{{ overlayIcon }}</div>
+        <div class="nav-meta">
+          <span class="nav-time">{{ durationText }}</span>
+          <span class="nav-distance">{{ distanceText }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom adaptive overlay — three progressive stages -->
+    <div v-if="overlayVisible" class="overlay">
+      <div class="overlay-card">
+        <div class="overlay-handle"></div>
+
+        <!-- Stages: v-if lives on Transition so the chain isn't broken by closing tags -->
+
+        <!-- Stage 0: gentle prompt -->
+        <Transition v-if="overlayStage === 0" name="fade">
+          <div class="overlay-stage stage-0">
+            <div class="stage0-pin">📍</div>
+            <div class="stage0-text">Qui puoi scegliere</div>
+          </div>
+        </Transition>
+
+        <!-- Stage 1: direction revealed (no action buttons yet) -->
+        <Transition v-else-if="overlayStage === 1" name="slide-up">
+          <div class="overlay-stage stage-1">
+            <div class="overlay-subtitle">Percorso a piedi</div>
+            <div class="overlay-main">
+              <div class="overlay-icon">{{ overlayIcon }}</div>
+              <div class="overlay-direction">{{ overlayDirection }}</div>
+            </div>
+          </div>
+        </Transition>
+
+        <!-- Stage 2: direction + action buttons -->
+        <Transition v-else-if="overlayStage === 2" name="slide-up">
+          <div class="overlay-stage stage-1">
+            <div class="overlay-subtitle">Percorso a piedi</div>
+            <div class="overlay-main">
+              <div class="overlay-icon">{{ overlayIcon }}</div>
+              <div class="overlay-direction">{{ overlayDirection }}</div>
+            </div>
+            <div class="overlay-actions">
+              <button class="btn primary wide" @click="followUser = true; dismissOverlay()">
+                Seguo questa strada
+              </button>
+              <button class="btn text-only" @click="followUser = false; dismissOverlay()">
+                Guardo la mappa
+              </button>
+            </div>
+          </div>
+        </Transition>
+
+      </div>
+    </div>
+<!-- Reroute overlay -->
+    <div v-if="rerouteOverlayVisible" class="overlay">
+      <div class="overlay-card">
+        <div class="overlay-handle"></div>
+
+        <Transition v-if="rerouteOverlayStage === 0" name="fade">
+          <div class="overlay-stage stage-0">
+            <img src="/src/assets/mascot.png" style="width:100px;height:100px;object-fit:contain;display:block;margin:0 auto 12px;" />
+          </div>
+        </Transition>
+
+        <Transition v-else-if="rerouteOverlayStage === 1" name="slide-up">
+          <div class="overlay-stage stage-1">
+            <img src="/src/assets/mascot.png" style="width:100px;height:100px;object-fit:contain;display:block;margin:0 auto 12px;" />
+            <div class="overlay-direction" style="font-size: 18px;">Va tutto bene.</div>
+            <div class="overlay-subtitle" style="font-size: 15px; color: #3b3b3b;">Sembra che il percorso sia cambiato.</div>
+          </div>
+        </Transition>
+
+        <Transition v-else-if="rerouteOverlayStage === 2" name="slide-up">
+          <div class="overlay-stage stage-1">
+            <img src="/src/assets/mascot.png" style="width:100px;height:100px;object-fit:contain;display:block;margin:0 auto 12px;" />
+            <div class="overlay-direction" style="font-size: 18px;">Va tutto bene.</div>
+            <div class="overlay-subtitle" style="font-size: 15px; color: #3b3b3b; margin-bottom: 16px;">Sembra che il percorso sia cambiato.</div>
+            <div class="overlay-actions">
+              <button class="btn primary wide" style="background: #1f6fe5;" @click="dismissRerouteOverlay()">
+                Mostra il nuovo percorso
+              </button>
+              <button class="btn text-only" @click="dismissRerouteOverlay()">
+                Controllo la mappa
+              </button>
+            </div>
+          </div>
+        </Transition>
+
+      </div>
+    </div>
+
+    <!-- Arrival state -->
+    <div v-if="hasArrived" class="arrival-screen">
+      <div class="arrival-header">
+        <span class="arrival-check">✓</span>
+        <span class="arrival-title">Sei arrivato</span>
+      </div>
+      <div class="arrival-body">
+        <p class="arrival-subtitle">Termine navigazione</p>
+        <div class="arrival-actions">
+          <button class="btn text-only arrival-share">Condividi viaggio</button>
+          <button class="btn primary arrival-exit" @click="exitNavigation()">
+            Esci
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="gpsError" class="floating-error">
+      {{ gpsError }}
+    </div>
+
+    <div v-if="!userLocation" class="floating-hint">
+      In attesa del GPS…
+    </div>
+
+    <div v-if="userLocation && !dest" class="floating-hint">
+      Tocca la mappa per scegliere una destinazione a piedi.
+    </div>
+    <!-- Route Preview -->
+<div v-if="showRoutePreview" class="route-preview-screen">
+  <div class="route-preview-header">
+    <div class="route-preview-meta">
+      <span class="route-preview-time">{{ durationText }}</span>
+      <span class="route-preview-dist">{{ distanceText }}</span>
+    </div>
+    <p class="route-preview-subtitle">Percorso a piedi</p>
+  </div>
+
+  <div class="route-preview-steps">
+    <div
+      v-for="step in routeSteps"
+      :key="step.index"
+      class="route-step"
+    >
+      <div class="route-step-icon">{{ step.icon }}</div>
+      <div class="route-step-label">{{ step.direction }}</div>
+    </div>
+  </div>
+
+  <div class="route-preview-footer">
+    <button class="btn primary wide route-start-btn" @click="startNavigation()">
+      Inizia
+    </button>
+  </div>
+</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
-import maplibregl, { type GeoJSONSource, type Map } from 'maplibre-gl'
+import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import maplibregl, { type Map, type GeoJSONSource } from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson'
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 type LngLat = { lng: number; lat: number }
-type RouteInfo = { distance: number; duration: number }
-type PointRole = 'start' | 'dest'
-type PointFeature = Feature<Point, { role: PointRole }>
-type PointFeatureCollection = FeatureCollection<Point, { role: PointRole }>
-type RouteFeature = Feature<LineString, RouteInfo>
-type DecisionNodeFeature = Feature<Point, { idx: number }>
-type DecisionNodeCollection = FeatureCollection<Point, { idx: number }>
 type CoordinatePair = [number, number]
+type RouteFeature = Feature<LineString, {}>
+type PointFeature = Feature<Point, {}>
+type RouteFeatureCollection = FeatureCollection<LineString, {}>
+type PointFeatureCollection = FeatureCollection<Point, {}>
 
-interface OsrmStep {
-  maneuver?: {
-    location?: CoordinatePair
-  }
+type DecisionNode = {
+  coords: CoordinatePair
+  modifier: string
+  triggered: boolean
 }
 
-interface OsrmRoute {
-  geometry?: {
-    coordinates?: number[][]
-  }
-  distance: number
-  duration: number
-  legs?: Array<{
-    steps?: OsrmStep[]
-  }>
+type NominatimResult = {
+  place_id: number
+  display_name: string
+  lat: string
+  lon: string
 }
 
-interface OsrmRouteResponse {
-  routes?: OsrmRoute[]
-}
+// ─── Map setup ────────────────────────────────────────────────────────────────
 
 const mapContainer = ref<HTMLDivElement | null>(null)
 let map: Map | null = null
+let watchId: number | null = null
 
-const start = ref<LngLat | null>(null)
-const dest = ref<LngLat | null>(null)
-const routeInfo = ref<RouteInfo | null>(null)
-const routeError = ref<string | null>(null)
-
-const OSRM_BASE = 'https://router.project-osrm.org'
-const PROFILE = 'driving' // reliable; later you can try 'walking' with your own OSRM instance
-
-const SRC_POINTS = 'points-src'
-const LYR_POINTS = 'points-layer'
 const SRC_ROUTE = 'route-src'
-const LYR_ROUTE = 'route-layer'
-const SRC_NODES = 'decision-nodes-src'
-const LYR_NODES = 'decision-nodes-layer'
+const LYR_ROUTE_CASE = 'route-case'
+const LYR_ROUTE = 'route-line'
+const SRC_USER = 'user-src'
+const LYR_USER_OUT = 'user-out'
+const LYR_USER_IN = 'user-in'
+const SRC_DEST = 'dest-src'
+const LYR_DEST = 'dest-layer'
 
-function makePointsFC(): PointFeatureCollection {
-  const features: PointFeature[] = []
-  if (start.value) {
-    features.push({
-      type: 'Feature',
-      properties: { role: 'start' },
-      geometry: { type: 'Point', coordinates: [start.value.lng, start.value.lat] }
-    })
+// ─── Navigation state ─────────────────────────────────────────────────────────
+
+const userLocation = ref<LngLat | null>(null)
+const dest = ref<LngLat | null>(null)
+const routeInfo = ref<{ distance: number; duration: number } | null>(null)
+const gpsError = ref<string | null>(null)
+const followUser = ref(true)
+const hasArrived = ref(false)
+const overlayDirection = ref('Continua')
+let maneuverModifiersCache: string[] = []
+let decisionNodes: DecisionNode[] = []
+
+// ─── Adaptive overlay state ───────────────────────────────────────────────────
+
+const overlayVisible = ref(false)
+const overlayStage = ref<0 | 1 | 2 | null>(null)
+let stageTimers: ReturnType<typeof setTimeout>[] = []
+
+// Legacy ref kept so existing logic that checks overlay.value.nodeIdx still works
+const overlay = ref({ visible: false, nodeIdx: null as number | null })
+
+// ─── Search panel state ───────────────────────────────────────────────────────
+
+const searchCollapsed = ref(false)
+const activeField = ref<'origin' | 'dest' | null>(null)
+const originQuery = ref('')
+const destQuery = ref('')
+const originSuggestions = ref<NominatimResult[]>([])
+const destSuggestions = ref<NominatimResult[]>([])
+const searchOrigin = ref<LngLat | null>(null)
+const searchDest = ref<LngLat | null>(null)
+
+// ─── Hesitation detection state ───────────────────────────────────────────────
+
+const PROXIMITY_RADIUS_M = 30
+const SPEED_SAMPLES: number[] = []
+const SPEED_WINDOW = 5
+let lastCheckTime = 0
+let lastCheckPos: LngLat | null = null
+let stopStartTime: number | null = null
+const STOP_THRESHOLD_MS = 4000
+
+const navigationStartTime = ref<number | null>(null)
+
+// ─── Reroute state ────────────────────────────────────────────────────────────
+
+let lastReroute: LngLat | null = null
+let lastRerouteTime = 0
+const isOffRoute = ref(false)
+
+const showRoutePreview = ref(false)
+
+// ─── Computed ─────────────────────────────────────────────────────────────────
+
+const durationText = computed(() => {
+  if (!routeInfo.value) return ''
+  return `${Math.round(routeInfo.value.duration / 60)} min`
+})
+
+const distanceText = computed(() => {
+  if (!routeInfo.value) return ''
+  const m = Math.round(routeInfo.value.distance)
+  return m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`
+})
+
+const overlayIcon = computed(() => {
+  const m = maneuverModifiersCache[overlay.value.nodeIdx ?? 0]
+  switch (m) {
+    case 'right':        return '↱'
+    case 'left':         return '↰'
+    case 'straight':     return '↑'
+    case 'slight right': return '↗'
+    case 'slight left':  return '↖'
+    default:             return '↑'
   }
-  if (dest.value) {
-    features.push({
-      type: 'Feature',
-      properties: { role: 'dest' },
-      geometry: { type: 'Point', coordinates: [dest.value.lng, dest.value.lat] }
-    })
-  }
-  return { type: 'FeatureCollection', features }
+})
+
+const routeSteps = computed(() => {
+  return decisionNodes.map((node, i) => ({
+    index: i,
+    direction: getDirectionLabel(i),
+    icon: (() => {
+      switch (maneuverModifiersCache[i]) {
+        case 'right': return '↱'
+        case 'left': return '↰'
+        case 'straight': return '↑'
+        case 'slight right': return '↗'
+        case 'slight left': return '↖'
+        default: return '↑'
+      }
+    })()
+  }))
+})
+
+// ─── GeoJSON helpers ──────────────────────────────────────────────────────────
+
+function emptyLineCollection(): RouteFeatureCollection {
+  return { type: 'FeatureCollection', features: [] }
 }
 
-function setPoints() {
-  const src = map?.getSource(SRC_POINTS) as GeoJSONSource | undefined
-  src?.setData(makePointsFC())
+function emptyPointCollection(): PointFeatureCollection {
+  return { type: 'FeatureCollection', features: [] }
 }
 
-function clearRoute() {
+function makeLineFeature(coords: number[][]): RouteFeature {
+  return { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }
+}
+
+function makePointFeature(lng: number, lat: number): PointFeature {
+  return { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [lng, lat] } }
+}
+
+// ─── Distance ─────────────────────────────────────────────────────────────────
+
+function distanceMeters(a: LngLat, b: LngLat): number {
+  const R = 6371000
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const dLat = toRad(b.lat - a.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const lat1 = toRad(a.lat)
+  const lat2 = toRad(b.lat)
+  const sin1 = Math.sin(dLat / 2)
+  const sin2 = Math.sin(dLng / 2)
+  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
+}
+
+async function fetchRoute(a: LngLat, b: LngLat) {
+  const url = `https://router.project-osrm.org/route/v1/foot/${a.lng},${a.lat};${b.lng},${b.lat}?steps=true&geometries=geojson&overview=full`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Routing failed: ${res.status}`)
+
+  const data = await res.json()
+  const route = data.routes?.[0]
+  if (!route) throw new Error('No route returned')
+
+  routeInfo.value = {
+    distance: route.distance,
+    duration: route.distance / 1.4  // 1.4 m/s = average walking speed (~5 km/h)
+  }
+
+  const coords: CoordinatePair[] = route.geometry.coordinates
   const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
-  const emptyRouteCollection: FeatureCollection<LineString> = { type: 'FeatureCollection', features: [] }
-  src?.setData(emptyRouteCollection)
+  src?.setData(makeLineFeature(coords))
+
+  const steps = route.legs?.[0]?.steps ?? []
+  maneuverModifiersCache = steps.map((s: any) => s.maneuver?.modifier ?? '')
+
+  decisionNodes = steps.map((s: any) => ({
+    coords: s.maneuver.location as CoordinatePair,
+    modifier: s.maneuver?.modifier ?? '',
+    triggered: false
+  }))
+
+  const first = decisionNodes.findIndex(n => n.modifier !== '')
+  const idx = first >= 0 ? first : 0
+  overlay.value.nodeIdx = idx
+  overlayDirection.value = getDirectionLabel(idx)
+}
+
+
+function getDirectionLabel(i: number): string {
+  const m = maneuverModifiersCache[i]
+  switch (m) {
+    case 'right':        return 'Continua a destra'
+    case 'left':         return 'Continua a sinistra'
+    case 'straight':     return 'Continua dritto'
+    case 'slight right': return 'Leggermente a destra'
+    case 'slight left':  return 'Leggermente a sinistra'
+    default:             return 'Continua'
+  }
+}
+
+function checkIfOffRoute(): boolean {
+  if (!userLocation.value || decisionNodes.length === 0) return false
+  // Check distance to nearest decision node or route point
+  const nearAnyNode = decisionNodes.some(n => {
+    const d = distanceMeters(userLocation.value!, { lng: n.coords[0], lat: n.coords[1] })
+    return d < 50
+  })
+  return !nearAnyNode
+}
+function checkArrival() {
+  if (!userLocation.value || !dest.value || hasArrived.value) return
+  if (!routeInfo.value) return
+  const dist = distanceMeters(userLocation.value, dest.value)
+  if (dist < 30) {
+    hasArrived.value = true
+    dismissOverlay()
+    dismissRerouteOverlay()
+  }
+}
+function exitNavigation() {
+  hasArrived.value = false
+  dest.value = null
   routeInfo.value = null
 }
-function clearDecisionNodes() {
-  const src = map?.getSource(SRC_NODES) as GeoJSONSource | undefined
-  const emptyDecisionNodes: DecisionNodeCollection = { type: 'FeatureCollection', features: [] }
-  src?.setData(emptyDecisionNodes)
-}
 
-function setDecisionNodes(points: CoordinatePair[]) {
-  const features: DecisionNodeFeature[] = points.map((c, idx) => ({
-    type: 'Feature',
-    properties: { idx },
-    geometry: { type: 'Point', coordinates: c }
-  }))
-  const src = map?.getSource(SRC_NODES) as GeoJSONSource | undefined
-  const collection: DecisionNodeCollection = { type: 'FeatureCollection', features }
-  src?.setData(collection)
-}
-function setRoute(feature: Feature<LineString>) {
-  const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
-  const collection: FeatureCollection<LineString> = { type: 'FeatureCollection', features: [feature] }
-  src?.setData(collection)
-}
-
-function fitToLineCoords(coords: [number, number][]) {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const [x, y] of coords) {
-    minX = Math.min(minX, x)
-    minY = Math.min(minY, y)
-    maxX = Math.max(maxX, x)
-    maxY = Math.max(maxY, y)
+function startNavigation() {
+  navigationStartTime.value = Date.now()
+  showRoutePreview.value = false
+  // Zoom into first decision node
+  const firstNode = decisionNodes.find(n => n.modifier !== '')
+  if (firstNode && map) {
+    map.flyTo({
+      center: [firstNode.coords[0], firstNode.coords[1]],
+      zoom: 18,
+      duration: 800
+    })
   }
-  map?.fitBounds([[minX, minY], [maxX, maxY]], { padding: 70, duration: 600 })
 }
-async function fetchRoute(a: LngLat, b: LngLat) {
-  const coords = `${a.lng},${a.lat};${b.lng},${b.lat}`
-  const url = `${OSRM_BASE}/route/v1/${PROFILE}/${coords}?overview=full&geometries=geojson&steps=true`
+// ─── Rerouting ────────────────────────────────────────────────────────────────
 
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`OSRM error: ${res.status}`)
-  const data: OsrmRouteResponse = await res.json()
-  const r = data?.routes?.[0]
-  if (!r?.geometry?.coordinates) throw new Error('No route returned')
-  const routeCoords = r.geometry.coordinates.filter(
-    (coord): coord is CoordinatePair => Array.isArray(coord) && coord.length === 2
-  )
-  if (!routeCoords.length) throw new Error('No route returned')
 
-  routeInfo.value = { distance: r.distance, duration: r.duration }
+async function reroute() {
+  if (!userLocation.value || !dest.value) return
+  const now = Date.now()
+  if (lastReroute) {
+    const moved = distanceMeters(userLocation.value, lastReroute)
+    if (moved < 20) return
+  }
+  if (now - lastRerouteTime < 5000) return
+  // Don't check off-route for first 10 seconds after starting
+  if (navigationStartTime.value && Date.now() - navigationStartTime.value < 10000) return
+  lastReroute = { ...userLocation.value }
+  lastRerouteTime = now
 
-  // Decision nodes = maneuver points (one per step)
-  const steps = data?.routes?.[0]?.legs?.[0]?.steps ?? []
-  const decisionNodes: CoordinatePair[] = steps
-    .map((s) => s?.maneuver?.location)
-    .filter((loc): loc is CoordinatePair => Array.isArray(loc) && loc.length === 2)
-
-  const routeFeature: RouteFeature = {
-    type: 'Feature',
-    properties: { distance: r.distance, duration: r.duration },
-    geometry: { type: 'LineString', coordinates: routeCoords }
+  // Check if user is off route before rerouting
+  const offRoute = checkIfOffRoute()
+  if (offRoute && !isOffRoute.value) {
+    isOffRoute.value = true
+    triggerRerouteOverlay()
   }
 
-  return {
-    routeFeature,
-    decisionNodes,
-    routeCoords
+  await fetchRoute(userLocation.value, dest.value)
+  
+  if (isOffRoute.value) {
+    isOffRoute.value = false
   }
 }
 
-function ensureLayers() {
+// ─── Map dot updates ──────────────────────────────────────────────────────────
+
+function updateUserDot() {
+  if (!map || !userLocation.value) return
+  const src = map.getSource(SRC_USER) as GeoJSONSource | undefined
+  src?.setData(makePointFeature(userLocation.value.lng, userLocation.value.lat))
+  if (followUser.value) {
+    map.easeTo({ center: [userLocation.value.lng, userLocation.value.lat], duration: 800 })
+  }
+}
+
+function updateDestinationDot() {
   if (!map) return
+  const src = map.getSource(SRC_DEST) as GeoJSONSource | undefined
+  if (!dest.value) {
+    src?.setData(emptyPointCollection())
+    return
+  }
+  src?.setData(makePointFeature(dest.value.lng, dest.value.lat))
+}
 
-  // Points source/layer
-  if (!map.getSource(SRC_POINTS)) {
-    map.addSource(SRC_POINTS, {
-      type: 'geojson',
-      data: makePointsFC()
-    })
-    map.addLayer({
-      id: LYR_POINTS,
-      type: 'circle',
-      source: SRC_POINTS,
-      paint: {
-        'circle-radius': 8,
-        'circle-stroke-width': 2
-      }
+// ─── Adaptive overlay ─────────────────────────────────────────────────────────
+
+function triggerOverlayForNode(node: DecisionNode) {
+  node.triggered = true
+  stopStartTime = null
+
+  const nodeIdx = decisionNodes.indexOf(node)
+  overlay.value.nodeIdx = nodeIdx
+  overlayDirection.value = getDirectionLabel(nodeIdx)
+
+  stageTimers.forEach(clearTimeout)
+  stageTimers = []
+
+  overlayStage.value = 0
+  overlayVisible.value = true
+
+  stageTimers.push(setTimeout(() => { overlayStage.value = 1 }, 1200))
+  stageTimers.push(setTimeout(() => { overlayStage.value = 2 }, 2800))
+}
+
+function dismissOverlay() {
+  stageTimers.forEach(clearTimeout)
+  stageTimers = []
+  overlayStage.value = null
+  overlayVisible.value = false
+  overlay.value.visible = false
+}
+
+
+// ─── Reroute overlay ──────────────────────────────────────────────────────────
+
+const rerouteOverlayVisible = ref(false)
+const rerouteOverlayStage = ref<0 | 1 | 2 | null>(null)
+let rerouteTimers: ReturnType<typeof setTimeout>[] = []
+
+function triggerRerouteOverlay() {
+  rerouteTimers.forEach(clearTimeout)
+  rerouteTimers = []
+
+  rerouteOverlayStage.value = 0
+  rerouteOverlayVisible.value = true
+
+  rerouteTimers.push(setTimeout(() => { rerouteOverlayStage.value = 1 }, 1200))
+  rerouteTimers.push(setTimeout(() => { rerouteOverlayStage.value = 2 }, 2800))
+}
+
+function dismissRerouteOverlay() {
+  rerouteTimers.forEach(clearTimeout)
+  rerouteTimers = []
+  rerouteOverlayStage.value = null
+  rerouteOverlayVisible.value = false
+  followUser.value = true  // ← add this
+  if (userLocation.value && map) {
+    map.easeTo({ 
+      center: [userLocation.value.lng, userLocation.value.lat], 
+      zoom: 17,
+      duration: 800 
     })
   }
+}
 
-  // Route source/layer
-  if (!map.getSource(SRC_ROUTE)) {
-    map.addSource(SRC_ROUTE, {
-      type: 'geojson',
-      data: { type: 'FeatureCollection', features: [] }
-    })
-    map.addLayer({
-      id: LYR_ROUTE,
-      type: 'line',
-      source: SRC_ROUTE,
-      paint: {
-        'line-width': 6
-      }
-    })
+function resetOverlayIfWalking(speed: number) {
+  if (!overlayVisible.value || overlayStage.value === null) return
+  if (speed > 0.8) {
+    stageTimers.forEach(clearTimeout)
+    stageTimers = []
+    overlayStage.value = 0
+    stageTimers.push(setTimeout(() => { overlayStage.value = 1 }, 1200))
+    stageTimers.push(setTimeout(() => { overlayStage.value = 2 }, 2800))
   }
-  // Decision nodes source/layer
-if (!map.getSource(SRC_NODES)) {
-  map.addSource(SRC_NODES, {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] }
-  })
-  map.addLayer({
-    id: LYR_NODES,
-    type: 'circle',
-    source: SRC_NODES,
-    paint: {
-      'circle-radius': 5,
-      'circle-stroke-width': 2
+}
+
+// ─── Hesitation detection ─────────────────────────────────────────────────────
+
+function checkDecisionNodeProximity() {
+  if (!userLocation.value || decisionNodes.length === 0) return
+
+  const now = Date.now()
+  const user = userLocation.value
+
+  // Rolling speed estimate
+  if (lastCheckPos && lastCheckTime) {
+    const elapsed = (now - lastCheckTime) / 1000
+    const moved = distanceMeters(user, lastCheckPos)
+    const speed = elapsed > 0 ? moved / elapsed : 0
+    SPEED_SAMPLES.push(speed)
+    if (SPEED_SAMPLES.length > SPEED_WINDOW) SPEED_SAMPLES.shift()
+  }
+
+  lastCheckPos = { ...user }
+  lastCheckTime = now
+
+  const avgSpeed = SPEED_SAMPLES.length
+    ? SPEED_SAMPLES.reduce((a, b) => a + b, 0) / SPEED_SAMPLES.length
+    : null
+
+  // Reset overlay if user picks up pace
+  if (avgSpeed !== null) resetOverlayIfWalking(avgSpeed)
+
+  // Check each untriggered decision node
+  for (const node of decisionNodes) {
+    if (node.triggered) continue
+    if (node.modifier === '') continue
+
+    const dist = distanceMeters(user, { lng: node.coords[0], lat: node.coords[1] })
+    if (dist > PROXIMITY_RADIUS_M) continue
+
+    const isStopped = avgSpeed !== null && avgSpeed < 0.1
+    const isSlow    = avgSpeed !== null && avgSpeed < 0.5
+
+    if (isStopped) {
+      if (stopStartTime === null) stopStartTime = now
+      if (now - stopStartTime >= STOP_THRESHOLD_MS) triggerOverlayForNode(node)
+    } else if (isSlow) {
+      stopStartTime = null
+      triggerOverlayForNode(node)
+    } else {
+      stopStartTime = null
     }
-  })
-}
+
+    break
+  }
+
+  // ✅ FIX 2b: After checking nodes, update the nav bar arrow to the next upcoming maneuver
+  // so the arrow in the top bar advances as the user walks past decision points
+  const nextNode = decisionNodes.find(n => !n.triggered && n.modifier !== '')
+  if (nextNode) {
+    const idx = decisionNodes.indexOf(nextNode)
+    overlay.value.nodeIdx = idx
+    overlayDirection.value = getDirectionLabel(idx)
+  }
 }
 
-function resetAll() {
-  start.value = null
-  dest.value = null
-  routeError.value = null
-  setPoints()
-  clearRoute()
-  clearDecisionNodes()
+// ─── Search / geocoding ───────────────────────────────────────────────────────
+
+let originDebounce: ReturnType<typeof setTimeout> | null = null
+let destDebounce:   ReturnType<typeof setTimeout> | null = null
+
+// ✅ FIX 3: Bias Nominatim results to Milan/Italy using viewbox + countrycodes
+async function geocode(query: string): Promise<NominatimResult[]> {
+  if (query.trim().length < 3) return []
+
+  // Milan bounding box: west, south, east, north
+  // Covers Milan city and its immediate surroundings
+  const milanViewbox = '9.04,45.39,9.28,45.54'
+
+  const params = new URLSearchParams({
+    format: 'json',
+    q: query,
+    limit: '5',
+    countrycodes: 'it',   // only Italian addresses
+    viewbox: milanViewbox, // prefer results inside this box
+    bounded: '0',          // 0 = also fall back to rest of Italy if nothing matches locally
+                           // change to '1' to strictly limit to Milan area only
+  })
+
+  const url = `https://nominatim.openstreetmap.org/search?${params}`
+  const res = await fetch(url, { headers: { 'Accept-Language': 'it' } })
+  return res.ok ? res.json() : []
 }
+
+function onOriginInput() {
+  searchOrigin.value = null
+  if (originDebounce) clearTimeout(originDebounce)
+  originDebounce = setTimeout(async () => {
+    originSuggestions.value = await geocode(originQuery.value)
+  }, 350)
+}
+
+function onDestInput() {
+  searchDest.value = null
+  if (destDebounce) clearTimeout(destDebounce)
+  destDebounce = setTimeout(async () => {
+    destSuggestions.value = await geocode(destQuery.value)
+  }, 350)
+}
+
+function selectOrigin(s: NominatimResult) {
+  originQuery.value = s.display_name
+  searchOrigin.value = { lng: parseFloat(s.lon), lat: parseFloat(s.lat) }
+  originSuggestions.value = []
+  activeField.value = null
+}
+
+function selectDest(s: NominatimResult) {
+  destQuery.value = s.display_name
+  searchDest.value = { lng: parseFloat(s.lon), lat: parseFloat(s.lat) }
+  destSuggestions.value = []
+  activeField.value = null
+}
+
+async function routeFromSearch() {
+  if (!searchOrigin.value || !searchDest.value) return
+  userLocation.value = searchOrigin.value
+  updateUserDot()
+  dest.value = searchDest.value
+  updateDestinationDot()
+  await fetchRoute(searchOrigin.value, searchDest.value)
+  map?.fitBounds(
+    [
+      [Math.min(searchOrigin.value.lng, searchDest.value.lng),
+       Math.min(searchOrigin.value.lat, searchDest.value.lat)],
+      [Math.max(searchOrigin.value.lng, searchDest.value.lng),
+       Math.max(searchOrigin.value.lat, searchDest.value.lat)]
+    ],
+    { padding: 60, duration: 800 }
+  )
+  showRoutePreview.value = true
+  searchCollapsed.value = true
+}
+// ─── Debug shortcuts ──────────────────────────────────────────────────────────
+
+let debugKeyHandler: ((e: KeyboardEvent) => void) | undefined
+
+function setupDebugShortcuts() {
+  debugKeyHandler = (e: KeyboardEvent) => {
+    if (e.key === 'h' || e.key === 'H') {
+      const node = decisionNodes.find(n => !n.triggered && n.modifier !== '')
+      if (!node) {
+        console.warn('[Debug] No untriggered decision nodes available')
+        return
+      }
+      console.log('[Debug] Simulating hesitation at node:', node)
+      triggerOverlayForNode(node)
+    }
+    if (e.key === 'r' || e.key === 'R') {
+      decisionNodes.forEach(n => (n.triggered = false))
+      dismissOverlay()
+      console.log('[Debug] All decision nodes reset')
+    }
+    if (e.key === 'v' || e.key === 'V') {
+      triggerRerouteOverlay()
+    }
+    if (e.key === 'a' || e.key === 'A') {
+      console.log('[Debug] Arrival triggered')
+      hasArrived.value = true
+      dismissOverlay()
+      dismissRerouteOverlay()
+    }
+  }
+  window.addEventListener('keydown', debugKeyHandler!)
+}
+
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 onMounted(() => {
+  searchCollapsed.value = window.innerWidth < 480
+  setupDebugShortcuts()
+
   if (!mapContainer.value) return
 
   map = new maplibregl.Map({
@@ -240,104 +792,549 @@ onMounted(() => {
       sources: {
         osm: {
           type: 'raster',
-          tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors'
+          tiles: [
+            'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+          ],
+          tileSize: 256
         }
       },
-      layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }]
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
     },
-    center: [9.19, 45.46],
-    zoom: 12
+    // ✅ BONUS FIX: Changed from Astana [71.43, 51.18] to Milan
+    center: [9.1900, 45.4642],
+    zoom: 14
   })
 
-  map.addControl(new maplibregl.NavigationControl(), 'top-right')
-
   map.on('load', () => {
-    ensureLayers()
-    setPoints()
-    clearRoute()
-    clearDecisionNodes()
+    map?.addSource(SRC_ROUTE, { type: 'geojson', data: emptyLineCollection() })
+    map?.addLayer({
+      id: LYR_ROUTE_CASE, type: 'line', source: SRC_ROUTE,
+      paint: { 'line-color': '#ffffff', 'line-width': 10 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' }
+    })
+    map?.addLayer({
+      id: LYR_ROUTE, type: 'line', source: SRC_ROUTE,
+      paint: { 'line-color': '#2563eb', 'line-width': 6 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' }
+    })
+
+    map?.addSource(SRC_USER, { type: 'geojson', data: emptyPointCollection() })
+    map?.addLayer({
+      id: LYR_USER_OUT, type: 'circle', source: SRC_USER,
+      paint: { 'circle-radius': 10, 'circle-color': '#ffffff' }
+    })
+    map?.addLayer({
+      id: LYR_USER_IN, type: 'circle', source: SRC_USER,
+      paint: { 'circle-radius': 6, 'circle-color': '#2563eb' }
+    })
+
+    map?.addSource(SRC_DEST, { type: 'geojson', data: emptyPointCollection() })
+    map?.addLayer({
+      id: LYR_DEST, type: 'circle', source: SRC_DEST,
+      paint: { 'circle-radius': 8, 'circle-color': '#16a34a' }
+    })
   })
 
   map.on('click', async (e) => {
-    const p: LngLat = { lng: e.lngLat.lng, lat: e.lngLat.lat }
-
-    // Click flow: Start -> Destination -> Reset
-    if (!start.value) {
-      start.value = p
-      setPoints()
-      clearRoute()
-      clearDecisionNodes()
-      return
-    }
-
-    if (!dest.value) {
-      dest.value = p
-      setPoints()
-      clearRoute()
-      routeError.value = null
-
-      try {
-        const { routeFeature, decisionNodes, routeCoords } = await fetchRoute(start.value, dest.value)
-        setRoute(routeFeature)
-        setDecisionNodes(decisionNodes)
-        fitToLineCoords(routeCoords)
-      } catch (err: any) {
-        console.error(err)
-        routeError.value = 'Unable to calculate a route right now. Please try again.'
-        clearRoute()
-        clearDecisionNodes()
-      }
-      return
-    }
-
-    resetAll()
+    if (!userLocation.value) return
+    if (routeInfo.value) return
+    dest.value = { lng: e.lngLat.lng, lat: e.lngLat.lat }
+    updateDestinationDot()
+    await fetchRoute(userLocation.value, dest.value)
   })
+
+  if (navigator.geolocation) {
+    watchId = navigator.geolocation.watchPosition(
+      async (pos) => {
+        userLocation.value = { lng: pos.coords.longitude, lat: pos.coords.latitude }
+        updateUserDot()
+        checkDecisionNodeProximity()
+        checkArrival()
+        if (dest.value) await reroute()
+      },
+      () => { gpsError.value = 'Impossibile ottenere la posizione GPS' },
+      { enableHighAccuracy: true }
+    )
+  }
 })
 
 onBeforeUnmount(() => {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId)
+  if (debugKeyHandler) window.removeEventListener('keydown', debugKeyHandler)
+  stageTimers.forEach(clearTimeout)
+  rerouteTimers.forEach(clearTimeout)
   map?.remove()
-  map = null
 })
 </script>
 
 <style scoped>
 .app {
+  position: relative;
   height: 100vh;
-  display: flex;
-  flex-direction: column;
-  font-family: system-ui, -apple-system, sans-serif;
-}
-.topbar {
-  padding: 10px 14px;
-  border-bottom: 1px solid #e0e0e0;
-  background: #ffffff;
-}
-.title {
-  font-weight: 600;
-  font-size: 16px;
-}
-.hint {
-  font-size: 13px;
-  color: #666;
-  margin-top: 2px;
-}
-.small {
-  font-size: 12px;
-  color: #444;
-  margin-top: 6px;
-}
-.error-banner {
-  margin-top: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-  color: #7a1f1f;
-  background: #fce8e8;
-  border: 1px solid #f2bcbc;
-  border-radius: 4px;
+  width: 100%;
+  overflow: hidden;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #d8d8d8;
+  padding-top: env(safe-area-inset-top);
+  box-sizing: border-box;
 }
 .map {
+  position: absolute;
+  inset: 0;
+}
+
+/* ── Search Panel ─────────────────────────────────────────────── */
+.search-panel {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 16px;
+  z-index: 40;
+  width: min(340px, calc(100vw - 32px));
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 20px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+  overflow: visible;
+  transition: width 0.2s ease;
+}
+
+.search-toggle {
+  display: block;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1d1d1f;
+  cursor: pointer;
+  border-radius: 20px;
+}
+
+.search-body {
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+
+.search-field label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8a8a8a;
+  padding-left: 2px;
+}
+
+.search-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-input-wrap input {
+  width: 100%;
+  padding: 10px 32px 10px 12px;
+  border: 1.5px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 14px;
+  color: #1d1d1f;
+  background: #f7f7f7;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+
+.search-input-wrap input:focus {
+  border-color: #2563eb;
+  background: #fff;
+}
+
+.clear-btn {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  z-index: 50;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.suggestions li {
+  padding: 9px 14px;
+  font-size: 13px;
+  color: #1d1d1f;
+  cursor: pointer;
+  line-height: 1.4;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.suggestions li:last-child { border-bottom: none; }
+.suggestions li:hover { background: #f0f5ff; }
+
+.go-btn { margin-top: 4px; }
+.go-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Top Nav Bar ──────────────────────────────────────────────── */
+.nav-top {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 16px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  transition: top 0.2s ease;
+}
+
+.nav-top.nav-below-search {
+  top: 88px;
+}
+
+.nav-top-inner {
+  min-width: 220px;
+  max-width: 340px;
+  width: fit-content;
+  background: #1f6fe5;
+  color: #ffffff;
+  border-radius: 18px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+}
+
+.nav-arrow   { font-size: 22px; line-height: 1; font-weight: 700; }
+.nav-meta    { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+.nav-time    { font-size: 18px; font-weight: 700; }
+.nav-distance{ font-size: 14px; opacity: 0.95; }
+
+/* ── Overlay bottom sheet ─────────────────────────────────────── */
+.overlay {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 20px;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.overlay-card {
+  width: min(100%, 360px);
+  background: #ffffff;
+  border-radius: 28px;
+  padding: 14px 18px 18px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.2), 0 4px 10px rgba(0, 0, 0, 0.08);
+  pointer-events: auto;
+  animation: sheetUp 0.25s ease;
+  min-height: 120px;
+}
+
+@keyframes sheetUp {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.overlay-handle {
+  width: 42px;
+  height: 5px;
+  border-radius: 999px;
+  background: #d1d1d6;
+  margin: 0 auto 14px;
+}
+
+/* Stage 0 */
+.stage-0 {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 16px;
+}
+
+.stage0-pin {
+  font-size: 36px;
+  animation: pulse-pin 1s ease-in-out infinite alternate;
+}
+
+@keyframes pulse-pin {
+  from { transform: translateY(0px);  opacity: 0.8; }
+  to   { transform: translateY(-6px); opacity: 1;   }
+}
+
+.stage0-text {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1d1d1f;
+  text-align: center;
+}
+
+/* Stage 1 */
+.overlay-subtitle {
+  text-align: center;
+  font-size: 13px;
+  color: #8a8a8a;
+  margin-bottom: 14px;
+}
+
+.overlay-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.overlay-icon      { font-size: 34px; color: #2f8f1f; line-height: 1; }
+.overlay-direction { font-size: 24px; line-height: 1.2; font-weight: 700; text-align: center; color: #1d1d1f; }
+
+/* Stage 2 */
+.overlay-actions { display: flex; flex-direction: column; gap: 10px; }
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+.btn {
+  appearance: none;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+}
+
+.btn:active { transform: scale(0.98); }
+
+.btn.primary {
+  background: #2f9e1f;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 16px;
+  border-radius: 14px;
+  padding: 14px 18px;
+}
+
+.btn.primary:hover { background: #27851a; }
+.btn.wide { width: 100%; }
+
+.btn.text-only {
+  background: transparent;
+  color: #5f6368;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 0 0;
+}
+
+/* ── Transitions ──────────────────────────────────────────────── */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.4s ease; }
+.fade-enter-from,   .fade-leave-to     { opacity: 0; }
+
+.slide-up-enter-active { transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.slide-up-enter-from   { opacity: 0; transform: translateY(16px); }
+
+/* ── Floating messages ────────────────────────────────────────── */
+.floating-error {
+  position: absolute;
+  left: 16px; right: 16px;
+  bottom: 210px;
+  z-index: 25;
+  margin: 0 auto;
+  width: min(100%, 360px);
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fdecec;
+  color: #8b1e1e;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.floating-hint {
+  position: absolute;
+  left: 16px; right: 16px;
+  bottom: 20px;
+  z-index: 15;
+  margin: 0 auto;
+  width: min(100%, 360px);
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #3b3b3b;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(6px);
+}
+
+/* ── Small screens ────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .nav-top        { top: 12px; left: 12px; right: 12px; }
+  .nav-top.nav-below-search { top: 88px; }
+  .overlay        { left: 12px; right: 12px; bottom: 14px; }
+  .overlay-direction { font-size: 22px; }
+  .floating-error { left: 12px; right: 12px; }
+  .floating-hint  { left: 12px; right: 12px; bottom: 14px; }
+}
+/* ── Arrival screen ───────────────────────────────────────────── */
+.arrival-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+.arrival-header {
+  background: #16a34a;
+  color: white;
+  padding: 20px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.arrival-body {
   flex: 1;
+  background: transparent !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: flex-end !important;
+  padding: 0 !important;
+}
+
+.arrival-subtitle {
+  font-size: 18px !important;
+  color: #1d1d1f !important;
+  margin: 0 !important;
+  font-weight: 600 !important;
+  padding: 16px 16px 0 !important;
+  background: white;
+}
+.arrival-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 12px !important;
+  width: 100% !important;
+  padding: 12px 16px 24px !important;
+  background: white;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.arrival-share {
+  color: #3b3b3b !important;
+  font-size: 15px !important;
+  border: 1.5px solid #e0e0e0 !important;
+  border-radius: 999px !important;
+  padding: 10px 18px !important;
+}
+
+.arrival-exit {
+  padding: 10px 28px !important;
+  border-radius: 999px !important;
+}
+
+/* ── Route Preview ────────────────────────────────────────────── */
+.route-preview-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.route-preview-header {
+  background: #1f6fe5;
+  color: white;
+  padding: 20px 16px 16px;
+}
+
+.route-preview-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.route-preview-time {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.route-preview-dist {
+  font-size: 16px;
+  opacity: 0.9;
+}
+
+.route-preview-subtitle {
+  margin: 4px 0 0;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.route-preview-steps {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.route-step {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.route-step-icon {
+  font-size: 22px;
+  width: 32px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.route-step-label {
+  font-size: 15px;
+  color: #1d1d1f;
+}
+
+.route-preview-footer {
+  padding: 16px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.route-start-btn {
+  font-size: 17px;
+  padding: 16px;
+  border-radius: 16px;
 }
 </style>
