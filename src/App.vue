@@ -158,11 +158,27 @@
             <div class="overlay-direction" style="font-size: 18px;">Va tutto bene.</div>
             <div class="overlay-subtitle" style="font-size: 15px; color: #3b3b3b; margin-bottom: 16px;">Sembra che il percorso sia cambiato.</div>
             <div class="overlay-actions">
-              <button class="btn primary wide" style="background: #1f6fe5;" @click="dismissRerouteOverlay()">
-                Mostra il nuovo percorso
+              <button class="btn primary wide" style="background: #1f6fe5;" @click="fetchAltRoute(); rerouteOverlayStage = 3">
+                Mostra percorso alternativo
               </button>
-              <button class="btn text-only" @click="dismissRerouteOverlay()">
-                Controllo la mappa
+              <button class="btn text-only" @click="keepOriginalRoute()">
+                Continua sul percorso attuale
+              </button>
+            </div>
+          </div>
+        </Transition>
+
+        <Transition v-else-if="rerouteOverlayStage === 3" name="slide-up">
+          <div class="overlay-stage stage-1">
+            <img src="/src/assets/mascot.png" style="width:100px;height:100px;object-fit:contain;display:block;margin:0 auto 12px;" />
+            <div class="overlay-direction" style="font-size: 18px;">Percorso alternativo</div>
+            <div class="overlay-subtitle" style="font-size: 15px; color: #3b3b3b; margin-bottom: 16px;">Vuoi usare questo percorso?</div>
+            <div class="overlay-actions">
+              <button class="btn primary wide" style="background: #1f6fe5;" @click="useAltRoute()">
+                Usa questo percorso
+              </button>
+              <button class="btn text-only" @click="keepOriginalRoute()">
+                Torna al percorso originale
               </button>
             </div>
           </div>
@@ -272,6 +288,13 @@ const LYR_USER_IN = 'user-in'
 const SRC_DEST = 'dest-src'
 const LYR_DEST = 'dest-layer'
 
+const SRC_ALT = 'alt-route-src'
+const LYR_ALT = 'alt-route-line'
+const LYR_ALT_CASE = 'alt-route-case'
+
+const SRC_ARROW = 'arrow-src'
+const LYR_ARROW = 'arrow-layer'
+
 // ─── Navigation state ─────────────────────────────────────────────────────────
 
 const userLocation = ref<LngLat | null>(null)
@@ -283,6 +306,10 @@ const hasArrived = ref(false)
 const overlayDirection = ref('Continua')
 let maneuverModifiersCache: string[] = []
 let decisionNodes: DecisionNode[] = []
+
+const originalRouteCoords = ref<CoordinatePair[]>([])
+const altRouteCoords = ref<CoordinatePair[]>([])
+const showingAltRoute = ref(false)
 
 // ─── Adaptive overlay state ───────────────────────────────────────────────────
 
@@ -430,6 +457,7 @@ async function fetchRoute(a: LngLat, b: LngLat) {
   const idx = first >= 0 ? first : 0
   overlay.value.nodeIdx = idx
   overlayDirection.value = getDirectionLabel(idx)
+  updateArrow()
 }
 
 
@@ -513,6 +541,44 @@ async function reroute() {
   }
 }
 
+function clearAltRoute() {
+  const src = map?.getSource(SRC_ALT) as GeoJSONSource | undefined
+  src?.setData(emptyLineCollection())
+  altRouteCoords.value = []
+  showingAltRoute.value = false
+}
+
+async function fetchAltRoute() {
+  if (!userLocation.value || !dest.value) return
+  const url = `https://router.project-osrm.org/route/v1/foot/${userLocation.value.lng},${userLocation.value.lat};${dest.value.lng},${dest.value.lat}?steps=true&geometries=geojson&overview=full&alternatives=true`
+  const res = await fetch(url)
+  if (!res.ok) return
+  const data = await res.json()
+  
+  // Pick the second route if available, otherwise use the first
+  const route = data.routes?.[1] ?? data.routes?.[0]
+  if (!route) return
+
+  altRouteCoords.value = route.geometry.coordinates
+  const src = map?.getSource(SRC_ALT) as GeoJSONSource | undefined
+  src?.setData(makeLineFeature(altRouteCoords.value))
+  showingAltRoute.value = true
+}
+
+function useAltRoute() {
+  if (!altRouteCoords.value.length) return
+  // Swap alt route to main route
+  const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
+  src?.setData(makeLineFeature(altRouteCoords.value))
+  clearAltRoute()
+  dismissRerouteOverlay()
+}
+
+function keepOriginalRoute() {
+  clearAltRoute()
+  dismissRerouteOverlay()
+}
+
 // ─── Map dot updates ──────────────────────────────────────────────────────────
 
 function updateUserDot() {
@@ -532,6 +598,35 @@ function updateDestinationDot() {
     return
   }
   src?.setData(makePointFeature(dest.value.lng, dest.value.lat))
+}
+
+function updateArrow() {
+  if (!map) return
+  const nextNode = decisionNodes.find(n => !n.triggered && n.modifier !== '')
+  if (!nextNode) {
+    const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
+    src?.setData(emptyPointCollection())
+    return
+  }
+  const bearing = modifierToBearing(nextNode.modifier)
+  const feature: PointFeature = {
+    type: 'Feature',
+    properties: { bearing },
+    geometry: { type: 'Point', coordinates: nextNode.coords }
+  }
+  const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
+  src?.setData({ type: 'FeatureCollection', features: [feature] })
+}
+
+function modifierToBearing(modifier: string): number {
+  switch (modifier) {
+    case 'right':        return 90
+    case 'left':         return 270
+    case 'slight right': return 45
+    case 'slight left':  return 315
+    case 'straight':     return 0
+    default:             return 0
+  }
 }
 
 // ─── Adaptive overlay ─────────────────────────────────────────────────────────
@@ -566,7 +661,7 @@ function dismissOverlay() {
 // ─── Reroute overlay ──────────────────────────────────────────────────────────
 
 const rerouteOverlayVisible = ref(false)
-const rerouteOverlayStage = ref<0 | 1 | 2 | null>(null)
+const rerouteOverlayStage = ref<0 | 1 | 2 | 3 | null>(null)
 let rerouteTimers: ReturnType<typeof setTimeout>[] = []
 
 function triggerRerouteOverlay() {
@@ -664,6 +759,7 @@ function checkDecisionNodeProximity() {
     const idx = decisionNodes.indexOf(nextNode)
     overlay.value.nodeIdx = idx
     overlayDirection.value = getDirectionLabel(idx)
+    updateArrow()
   }
 }
 
@@ -835,6 +931,54 @@ onMounted(() => {
       id: LYR_DEST, type: 'circle', source: SRC_DEST,
       paint: { 'circle-radius': 8, 'circle-color': '#16a34a' }
     })
+    const SRC_ALT = 'alt-route-src'
+    const LYR_ALT = 'alt-route-line'
+    const LYR_ALT_CASE = 'alt-route-case'
+
+    map?.addSource(SRC_ALT, { type: 'geojson', data: emptyLineCollection() })
+    map?.addLayer({
+      id: LYR_ALT_CASE, type: 'line', source: SRC_ALT,
+      paint: { 'line-color': '#ffffff', 'line-width': 10 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' }
+    })
+    map?.addLayer({
+      id: LYR_ALT, type: 'line', source: SRC_ALT,
+      paint: { 'line-color': '#9ca3af', 'line-width': 6 },
+      layout: { 'line-cap': 'round', 'line-join': 'round' }
+    })
+        // Create arrow image programmatically
+    const arrowSize = 80
+    const arrowCanvas = document.createElement('canvas')
+    arrowCanvas.width = arrowSize
+    arrowCanvas.height = arrowSize
+    const ctx = arrowCanvas.getContext('2d')!
+    ctx.fillStyle = '#2563eb'
+    ctx.beginPath()
+    ctx.moveTo(arrowSize / 2, 4)
+    ctx.lineTo(arrowSize - 4, arrowSize - 4)
+    ctx.lineTo(arrowSize / 2, arrowSize - 16)
+    ctx.lineTo(4, arrowSize - 4)
+    ctx.closePath()
+    ctx.fill()
+
+    const arrowImage = new Image()
+    arrowImage.src = arrowCanvas.toDataURL()
+    arrowImage.onload = () => {
+      map?.addImage('nav-arrow', arrowImage)
+      map?.addSource(SRC_ARROW, { type: 'geojson', data: emptyPointCollection() })
+      map?.addLayer({
+        id: LYR_ARROW,
+        type: 'symbol',
+        source: SRC_ARROW,
+        layout: {
+          'icon-image': 'nav-arrow',
+          'icon-size': 0.6,
+          'icon-rotate': ['get', 'bearing'],
+          'icon-rotation-alignment': 'map',
+          'icon-allow-overlap': true
+        }
+      })
+    }
   })
 
   map.on('click', async (e) => {
