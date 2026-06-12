@@ -23,6 +23,11 @@
               class="clear-btn"
               @click="originQuery = ''; originSuggestions = []"
             >✕</button>
+            <button
+              v-if="speechSupported"
+              class="mic-btn"
+              @click="startVoiceInput('origin')"
+            >{{ isListening ? '⏹' : '🎤' }}</button>
           </div>
           <ul v-if="activeField === 'origin' && originSuggestions.length" class="suggestions">
             <li
@@ -50,6 +55,11 @@
               class="clear-btn"
               @click="destQuery = ''; destSuggestions = []"
             >✕</button>
+            <button
+              v-if="speechSupported"
+              class="mic-btn"
+              @mousedown.prevent="startVoiceInput('dest')"
+            >{{ isListening ? '⏹' : '🎤' }}</button>
           </div>
           <ul v-if="activeField === 'dest' && destSuggestions.length" class="suggestions">
             <li
@@ -85,58 +95,71 @@
         </div>
       </div>
     </div>
+    <!-- Cancel route button -->
+<button
+  v-if="routeInfo && !showRoutePreview"
+  class="cancel-route-btn"
+  @click="cancelRoute()"
+>
+  ✕ Annulla percorso
+</button>
+<div v-if="overlayVisible" class="overlay">
+  <div class="overlay-card">
+    <div 
+      class="overlay-handle"
+      @touchstart="onDragStart"
+      @touchmove.prevent="onDragMove"
+      @touchend="onDragEnd"
+    ></div>
+    <button class="overlay-close-btn" @click="dismissOverlay()">✕</button>
 
-    <!-- Bottom adaptive overlay — three progressive stages -->
-    <div v-if="overlayVisible" class="overlay">
-      <div class="overlay-card">
-        <div class="overlay-handle"></div>
-
-        <!-- Stages: v-if lives on Transition so the chain isn't broken by closing tags -->
-
-        <!-- Stage 0: gentle prompt -->
-        <Transition v-if="overlayStage === 0" name="fade">
-          <div class="overlay-stage stage-0">
-            <div class="stage0-pin">📍</div>
-            <div class="stage0-text">Qui puoi scegliere</div>
-          </div>
-        </Transition>
-
-        <!-- Stage 1: direction revealed (no action buttons yet) -->
-        <Transition v-else-if="overlayStage === 1" name="slide-up">
-          <div class="overlay-stage stage-1">
-            <div class="overlay-subtitle">Percorso a piedi</div>
-            <div class="overlay-main">
-              <div class="overlay-icon">{{ overlayIcon }}</div>
-              <div class="overlay-direction">{{ overlayDirection }}</div>
-            </div>
-          </div>
-        </Transition>
-
-        <!-- Stage 2: direction + action buttons -->
-        <Transition v-else-if="overlayStage === 2" name="slide-up">
-          <div class="overlay-stage stage-1">
-            <div class="overlay-subtitle">Percorso a piedi</div>
-            <div class="overlay-main">
-              <div class="overlay-icon">{{ overlayIcon }}</div>
-              <div class="overlay-direction">{{ overlayDirection }}</div>
-            </div>
-            <div class="overlay-actions">
-              <button class="btn primary wide" @click="followUser = true; dismissOverlay()">
-                Seguo questa strada
-              </button>
-              <button class="btn text-only" @click="followUser = false; dismissOverlay()">
-                Guardo la mappa
-              </button>
-            </div>
-          </div>
-        </Transition>
-
+    <Transition v-if="overlayStage === 0" name="fade">
+      <div class="overlay-stage stage-0">
+        <div class="stage0-pin">📍</div>
+        <div class="stage0-text">Qui puoi scegliere</div>
       </div>
-    </div>
+    </Transition>
+
+    <Transition v-else-if="overlayStage === 1" name="slide-up">
+      <div class="overlay-stage stage-1">
+        <div class="overlay-subtitle">Percorso a piedi</div>
+        <div class="overlay-main">
+          <div class="overlay-icon">{{ overlayIcon }}</div>
+          <div class="overlay-direction">{{ overlayDirection }}</div>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition v-else-if="overlayStage === 2" name="slide-up">
+      <div class="overlay-stage stage-1">
+        <div class="overlay-subtitle">Percorso a piedi</div>
+        <div class="overlay-main">
+          <div class="overlay-icon">{{ overlayIcon }}</div>
+          <div class="overlay-direction">{{ overlayDirection }}</div>
+        </div>
+        <div class="overlay-actions">
+          <button class="btn primary wide" @click="followUser = true; dismissOverlay()">
+            Seguo questa strada
+          </button>
+          <button class="btn text-only" @click="followUser = false; dismissOverlay()">
+            Guardo la mappa
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+  </div>
+</div>
 <!-- Reroute overlay -->
     <div v-if="rerouteOverlayVisible" class="overlay">
       <div class="overlay-card">
-        <div class="overlay-handle"></div>
+        <div 
+          class="overlay-handle"
+          @touchstart="onDragStart"
+          @touchmove.prevent="onDragMoveReroute"
+          @touchend="onDragEnd"
+        ></div>
+        <button class="overlay-close-btn" @click="dismissRerouteOverlay()">✕</button>
 
         <Transition v-if="rerouteOverlayStage === 0" name="fade">
           <div class="overlay-stage stage-0">
@@ -242,7 +265,15 @@
     </button>
   </div>
 </div>
-  </div>
+<!-- Recenter button -->
+<button
+  v-if="userLocation && routeInfo"
+  class="recenter-btn"
+  @click="recenterMap()"
+>
+  ◎
+</button>
+</div>
 </template>
 
 <script setup lang="ts">
@@ -294,6 +325,9 @@ const LYR_ALT_CASE = 'alt-route-case'
 
 const SRC_ARROW = 'arrow-src'
 const LYR_ARROW = 'arrow-layer'
+
+const isListening = ref(false)
+const speechSupported = typeof window !== 'undefined' && 'webkitSpeechRecognition' in window
 
 // ─── Navigation state ─────────────────────────────────────────────────────────
 
@@ -443,7 +477,6 @@ async function fetchRoute(a: LngLat, b: LngLat) {
   const coords: CoordinatePair[] = route.geometry.coordinates
   const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
   src?.setData(makeLineFeature(coords))
-
   const steps = route.legs?.[0]?.steps ?? []
   maneuverModifiersCache = steps.map((s: any) => s.maneuver?.modifier ?? '')
 
@@ -460,6 +493,28 @@ async function fetchRoute(a: LngLat, b: LngLat) {
   updateArrow()
 }
 
+function recenterMap() {
+  followUser.value = true
+  if (userLocation.value && map) {
+    map.easeTo({ center: [userLocation.value.lng, userLocation.value.lat], zoom: 17, duration: 800 })
+  }
+}
+
+function cancelRoute() {
+  dest.value = null
+  routeInfo.value = null
+  decisionNodes = []
+  maneuverModifiersCache = []
+  dismissOverlay()
+  dismissRerouteOverlay()
+  hasArrived.value = false
+  showRoutePreview.value = false
+  const routeSrc = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
+  routeSrc?.setData(emptyLineCollection())
+  const destSrc = map?.getSource(SRC_DEST) as GeoJSONSource | undefined
+  destSrc?.setData(emptyPointCollection())
+  updateArrow()
+}
 
 function getDirectionLabel(i: number): string {
   const m = maneuverModifiersCache[i]
@@ -511,6 +566,42 @@ function startNavigation() {
     })
   }
 }
+// ─── Drag to dismiss ──────────────────────────────────────────────────────────
+let dragStartY = 0
+let isDragging = false
+
+function onDragStart(e: TouchEvent) {
+  const touch = e.touches[0]
+  if (!touch) return
+  dragStartY = touch.clientY
+  isDragging = true
+}
+
+function onDragMove(e: TouchEvent) {
+  if (!isDragging) return
+  const touch = e.touches[0]
+  if (!touch) return
+  const deltaY = touch.clientY - dragStartY
+  if (deltaY > 80) {
+    isDragging = false
+    dismissOverlay()
+  }
+}
+
+function onDragMoveReroute(e: TouchEvent) {
+  if (!isDragging) return
+  const touch = e.touches[0]
+  if (!touch) return
+  const deltaY = touch.clientY - dragStartY
+  if (deltaY > 80) {
+    isDragging = false
+    dismissRerouteOverlay()
+  }
+}
+
+function onDragEnd() {
+  isDragging = false
+}
 // ─── Rerouting ────────────────────────────────────────────────────────────────
 
 
@@ -550,13 +641,17 @@ function clearAltRoute() {
 
 async function fetchAltRoute() {
   if (!userLocation.value || !dest.value) return
-  const url = `https://router.project-osrm.org/route/v1/foot/${userLocation.value.lng},${userLocation.value.lat};${dest.value.lng},${dest.value.lat}?steps=true&geometries=geojson&overview=full&alternatives=true`
+
+  // Add a slight offset waypoint to force OSRM to find a different path
+  const midLng = (userLocation.value.lng + dest.value.lng) / 2 + 0.003
+  const midLat = (userLocation.value.lat + dest.value.lat) / 2 + 0.003
+
+  const url = `https://router.project-osrm.org/route/v1/foot/${userLocation.value.lng},${userLocation.value.lat};${midLng},${midLat};${dest.value.lng},${dest.value.lat}?steps=true&geometries=geojson&overview=full`
   const res = await fetch(url)
   if (!res.ok) return
   const data = await res.json()
-  
-  // Pick the second route if available, otherwise use the first
-  const route = data.routes?.[1] ?? data.routes?.[0]
+
+  const route = data.routes?.[0]
   if (!route) return
 
   altRouteCoords.value = route.geometry.coordinates
@@ -603,7 +698,7 @@ function updateDestinationDot() {
 function updateArrow() {
   if (!map) return
   const nextNode = decisionNodes.find(n => !n.triggered && n.modifier !== '')
-  if (!nextNode) {
+  if (!nextNode || !userLocation.value) {
     const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
     src?.setData(emptyPointCollection())
     return
@@ -612,7 +707,7 @@ function updateArrow() {
   const feature: PointFeature = {
     type: 'Feature',
     properties: { bearing },
-    geometry: { type: 'Point', coordinates: nextNode.coords }
+    geometry: { type: 'Point', coordinates: [userLocation.value.lng, userLocation.value.lat] }
   }
   const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
   src?.setData({ type: 'FeatureCollection', features: [feature] })
@@ -752,8 +847,7 @@ function checkDecisionNodeProximity() {
     break
   }
 
-  // ✅ FIX 2b: After checking nodes, update the nav bar arrow to the next upcoming maneuver
-  // so the arrow in the top bar advances as the user walks past decision points
+  
   const nextNode = decisionNodes.find(n => !n.triggered && n.modifier !== '')
   if (nextNode) {
     const idx = decisionNodes.indexOf(nextNode)
@@ -768,7 +862,32 @@ function checkDecisionNodeProximity() {
 let originDebounce: ReturnType<typeof setTimeout> | null = null
 let destDebounce:   ReturnType<typeof setTimeout> | null = null
 
-// ✅ FIX 3: Bias Nominatim results to Milan/Italy using viewbox + countrycodes
+function startVoiceInput(field: 'origin' | 'dest') {
+  if (!speechSupported) return
+  const SpeechRecognition = (window as any).webkitSpeechRecognition
+  const recognition = new SpeechRecognition()
+  recognition.lang = 'it-IT'
+  recognition.continuous = false
+  recognition.interimResults = false
+
+  isListening.value = true
+
+  recognition.onresult = async (event: any) => {
+    const transcript = event.results[0][0].transcript
+    isListening.value = false
+    if (field === 'origin') {
+      originQuery.value = transcript
+      originSuggestions.value = await geocode(transcript)
+    } else {
+      destQuery.value = transcript
+      destSuggestions.value = await geocode(transcript)
+    }
+  }
+
+  recognition.onerror = () => { isListening.value = false }
+  recognition.onend = () => { isListening.value = false }
+  recognition.start()
+}
 async function geocode(query: string): Promise<NominatimResult[]> {
   if (query.trim().length < 3) return []
 
@@ -898,7 +1017,7 @@ onMounted(() => {
       },
       layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
     },
-    // ✅ BONUS FIX: Changed from Astana [71.43, 51.18] to Milan
+   
     center: [9.1900, 45.4642],
     zoom: 14
   })
@@ -912,7 +1031,7 @@ onMounted(() => {
     })
     map?.addLayer({
       id: LYR_ROUTE, type: 'line', source: SRC_ROUTE,
-      paint: { 'line-color': '#2563eb', 'line-width': 6 },
+      paint: { 'line-color': '#2563eb', 'line-width': 10 },
       layout: { 'line-cap': 'round', 'line-join': 'round' }
     })
 
@@ -946,6 +1065,7 @@ onMounted(() => {
       paint: { 'line-color': '#9ca3af', 'line-width': 6 },
       layout: { 'line-cap': 'round', 'line-join': 'round' }
     })
+
         // Create arrow image programmatically
     const arrowSize = 80
     const arrowCanvas = document.createElement('canvas')
@@ -982,12 +1102,40 @@ onMounted(() => {
   })
 
   map.on('click', async (e) => {
-    if (!userLocation.value) return
-    if (routeInfo.value) return
-    dest.value = { lng: e.lngLat.lng, lat: e.lngLat.lat }
-    updateDestinationDot()
-    await fetchRoute(userLocation.value, dest.value)
-  })
+  if (!userLocation.value) return
+  if (routeInfo.value) return
+
+  const lng = e.lngLat.lng
+  const lat = e.lngLat.lat
+
+  dest.value = { lng, lat }
+  updateDestinationDot()
+
+  // Reverse geocode the tapped point
+  try {
+    const reverseUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18`
+    const res = await fetch(reverseUrl, { headers: { 'Accept-Language': 'it' } })
+    if (res.ok) {
+      const data = await res.json()
+      destQuery.value = data.display_name ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+      searchDest.value = { lng, lat }
+    }
+  } catch {}
+
+  // Auto-fill origin with current GPS position
+  try {
+    const revOrigin = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${userLocation.value.lat}&lon=${userLocation.value.lng}&zoom=18`
+    const resOrigin = await fetch(revOrigin, { headers: { 'Accept-Language': 'it' } })
+    if (resOrigin.ok) {
+      const dataOrigin = await resOrigin.json()
+      originQuery.value = dataOrigin.display_name ?? 'Posizione attuale'
+      searchOrigin.value = { ...userLocation.value }
+    }
+  } catch {}
+
+  searchCollapsed.value = false
+  await fetchRoute(userLocation.value, dest.value)
+})
 
   if (navigator.geolocation) {
     watchId = navigator.geolocation.watchPosition(
@@ -1089,7 +1237,7 @@ onBeforeUnmount(() => {
 
 .search-input-wrap input {
   width: 100%;
-  padding: 10px 32px 10px 12px;
+  padding: 10px 60px 10px 12px;
   border: 1.5px solid #e0e0e0;
   border-radius: 12px;
   font-size: 14px;
@@ -1104,7 +1252,16 @@ onBeforeUnmount(() => {
   border-color: #2563eb;
   background: #fff;
 }
-
+.mic-btn {
+  position: absolute;
+  right: 30px;
+  background: none;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+  color: #555;
+}
 .clear-btn {
   position: absolute;
   right: 8px;
@@ -1140,6 +1297,45 @@ onBeforeUnmount(() => {
   cursor: pointer;
   line-height: 1.4;
   border-bottom: 1px solid #f0f0f0;
+}
+.recenter-btn {
+  position: absolute;
+  bottom: 100px;
+  right: 16px;
+  z-index: 25;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: white;
+  border: none;
+  font-size: 20px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.recenter-btn:active {
+  transform: scale(0.95);
+}
+
+.cancel-route-btn {
+  position: absolute;
+  top: 88px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  background: white;
+  border: 1.5px solid #e0e0e0;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e53e3e;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  white-space: nowrap;
 }
 
 .suggestions li:last-child { border-bottom: none; }
@@ -1185,6 +1381,7 @@ onBeforeUnmount(() => {
 .nav-time    { font-size: 18px; font-weight: 700; }
 .nav-distance{ font-size: 14px; opacity: 0.95; }
 
+
 /* ── Overlay bottom sheet ─────────────────────────────────────── */
 .overlay {
   position: absolute;
@@ -1206,6 +1403,7 @@ onBeforeUnmount(() => {
   pointer-events: auto;
   animation: sheetUp 0.25s ease;
   min-height: 120px;
+  position: relative;
 }
 
 @keyframes sheetUp {
@@ -1406,7 +1604,22 @@ onBeforeUnmount(() => {
   padding: 10px 28px !important;
   border-radius: 999px !important;
 }
+.overlay-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: #aaa;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
 
+.overlay-close-btn:hover {
+  color: #555;
+}
 /* ── Route Preview ────────────────────────────────────────────── */
 .route-preview-screen {
   position: absolute;
