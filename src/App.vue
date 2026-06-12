@@ -326,6 +326,9 @@ const LYR_ALT_CASE = 'alt-route-case'
 const SRC_ARROW = 'arrow-src'
 const LYR_ARROW = 'arrow-layer'
 
+const SRC_ROUTE_ARROWS = 'route-arrows-src'
+const LYR_ROUTE_ARROWS = 'route-arrows-layer'
+
 const isListening = ref(false)
 const speechSupported = typeof window !== 'undefined' && 'webkitSpeechRecognition' in window
 
@@ -479,7 +482,9 @@ async function fetchRoute(a: LngLat, b: LngLat) {
   src?.setData(makeLineFeature(coords))
   const steps = route.legs?.[0]?.steps ?? []
   maneuverModifiersCache = steps.map((s: any) => s.maneuver?.modifier ?? '')
-
+  console.log('First coord:', coords[0], 'Last coord:', coords[coords.length - 1])
+  const arrowsSrc = map?.getSource(SRC_ROUTE_ARROWS) as GeoJSONSource | undefined
+  arrowsSrc?.setData(makeLineFeature(coords))
   decisionNodes = steps.map((s: any) => ({
     coords: s.maneuver.location as CoordinatePair,
     modifier: s.maneuver?.modifier ?? '',
@@ -511,6 +516,8 @@ function cancelRoute() {
   showRoutePreview.value = false
   const routeSrc = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
   routeSrc?.setData(emptyLineCollection())
+  const arrowsSrc = map?.getSource(SRC_ROUTE_ARROWS) as GeoJSONSource | undefined
+  arrowsSrc?.setData(emptyLineCollection())
   const destSrc = map?.getSource(SRC_DEST) as GeoJSONSource | undefined
   destSrc?.setData(emptyPointCollection())
   updateArrow()
@@ -1065,7 +1072,43 @@ onMounted(() => {
       paint: { 'line-color': '#9ca3af', 'line-width': 6 },
       layout: { 'line-cap': 'round', 'line-join': 'round' }
     })
+    // Small white chevron arrows along the route
+    const chevronCanvas = document.createElement('canvas')
+    chevronCanvas.width = 16
+    chevronCanvas.height = 16
+    const chevCtx = chevronCanvas.getContext('2d')!
+    chevCtx.strokeStyle = '#ffffff'
+    chevCtx.lineWidth = 2.5
+    chevCtx.lineCap = 'round'
+    chevCtx.lineJoin = 'round'
+    chevCtx.beginPath()
+    chevCtx.moveTo(4, 11)
+    chevCtx.lineTo(8, 5)
+    chevCtx.lineTo(12, 11)
+    chevCtx.stroke()
 
+    const chevronImg = new Image()
+    chevronImg.src = chevronCanvas.toDataURL()
+    chevronImg.onload = () => {
+      map?.addImage('chevron-arrow', chevronImg)
+      map?.addSource(SRC_ROUTE_ARROWS, { type: 'geojson', data: emptyLineCollection() })
+      map?.addLayer({
+        id: LYR_ROUTE_ARROWS,
+        type: 'symbol',
+        source: SRC_ROUTE_ARROWS,
+        layout: {
+          'symbol-placement': 'line',
+          'symbol-spacing': 50,
+          'icon-image': 'chevron-arrow',
+          'icon-size': 1,
+          'icon-rotate': 90,
+          'icon-rotation-alignment': 'map',
+          'icon-pitch-alignment': 'map',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true
+        }
+      })
+    }
         // Create arrow image programmatically
     const arrowSize = 80
     const arrowCanvas = document.createElement('canvas')
