@@ -343,6 +343,7 @@ const hasArrived = ref(false)
 const overlayDirection = ref('Continua')
 let maneuverModifiersCache: string[] = []
 let decisionNodes: DecisionNode[] = []
+const routeCoords = ref<{ lng: number; lat: number }[]>([])
 
 const originalRouteCoords = ref<CoordinatePair[]>([])
 const altRouteCoords = ref<CoordinatePair[]>([])
@@ -478,6 +479,7 @@ async function fetchRoute(a: LngLat, b: LngLat) {
   }
 
   const coords: CoordinatePair[] = route.geometry.coordinates
+  routeCoords.value = coords.map(c => ({ lng: c[0], lat: c[1] }))
   const src = map?.getSource(SRC_ROUTE) as GeoJSONSource | undefined
   src?.setData(makeLineFeature(coords))
   const steps = route.legs?.[0]?.steps ?? []
@@ -702,34 +704,61 @@ function updateDestinationDot() {
   src?.setData(makePointFeature(dest.value.lng, dest.value.lat))
 }
 
+function findNearestRouteIndex(user: LngLat): number {
+  let minDist = Infinity
+  let nearestIdx = 0
+  for (let i = 0; i < routeCoords.value.length; i++) {
+    const point = routeCoords.value[i]
+    if (!point) continue
+    const d = distanceMeters(user, point)
+    if (d < minDist) {
+      minDist = d
+      nearestIdx = i
+    }
+  }
+  return nearestIdx
+}
+
+function calculateBearing(from: LngLat, to: LngLat): number {
+  const lat1 = from.lat * Math.PI / 180
+  const lat2 = to.lat * Math.PI / 180
+  const dLng = (to.lng - from.lng) * Math.PI / 180
+
+  const y = Math.sin(dLng) * Math.cos(lat2)
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng)
+  const bearing = Math.atan2(y, x) * 180 / Math.PI
+
+  return (bearing + 360) % 360
+}
+
 function updateArrow() {
   if (!map) return
   const nextNode = decisionNodes.find(n => !n.triggered && n.modifier !== '')
-  if (!nextNode || !userLocation.value) {
+  if (!nextNode || !userLocation.value || routeCoords.value.length < 2) {
     const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
     src?.setData(emptyPointCollection())
     return
   }
-  const bearing = modifierToBearing(nextNode.modifier)
+
+  const user = userLocation.value
+  const nearestIdx = findNearestRouteIndex(user)
+
+  // Look a few points ahead on the route to get a stable direction
+  const lookAheadIdx = Math.min(nearestIdx + 5, routeCoords.value.length - 1)
+  const target = routeCoords.value[lookAheadIdx]
+  if (!target) return
+
+  const bearing = calculateBearing(user, target)
+
   const feature: PointFeature = {
     type: 'Feature',
     properties: { bearing },
-    geometry: { type: 'Point', coordinates: [userLocation.value.lng, userLocation.value.lat] }
+    geometry: { type: 'Point', coordinates: [user.lng, user.lat] }
   }
   const src = map.getSource(SRC_ARROW) as GeoJSONSource | undefined
   src?.setData({ type: 'FeatureCollection', features: [feature] })
 }
 
-function modifierToBearing(modifier: string): number {
-  switch (modifier) {
-    case 'right':        return 90
-    case 'left':         return 270
-    case 'slight right': return 45
-    case 'slight left':  return 315
-    case 'straight':     return 0
-    default:             return 0
-  }
-}
 
 // ─── Adaptive overlay ─────────────────────────────────────────────────────────
 
@@ -860,8 +889,8 @@ function checkDecisionNodeProximity() {
     const idx = decisionNodes.indexOf(nextNode)
     overlay.value.nodeIdx = idx
     overlayDirection.value = getDirectionLabel(idx)
-    updateArrow()
   }
+  updateArrow() 
 }
 
 // ─── Search / geocoding ───────────────────────────────────────────────────────
@@ -973,6 +1002,9 @@ let debugKeyHandler: ((e: KeyboardEvent) => void) | undefined
 function setupDebugShortcuts() {
   debugKeyHandler = (e: KeyboardEvent) => {
     if (e.key === 'h' || e.key === 'H') {
+      // Ignore shortcuts while typing in an input field
+      const target = e.target as HTMLElement
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
       const node = decisionNodes.find(n => !n.triggered && n.modifier !== '')
       if (!node) {
         console.warn('[Debug] No untriggered decision nodes available')
@@ -982,14 +1014,23 @@ function setupDebugShortcuts() {
       triggerOverlayForNode(node)
     }
     if (e.key === 'r' || e.key === 'R') {
+    // Ignore shortcuts while typing in an input field
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
       decisionNodes.forEach(n => (n.triggered = false))
       dismissOverlay()
       console.log('[Debug] All decision nodes reset')
     }
     if (e.key === 'v' || e.key === 'V') {
+      // Ignore shortcuts while typing in an input field
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
       triggerRerouteOverlay()
     }
     if (e.key === 'a' || e.key === 'A') {
+      // Ignore shortcuts while typing in an input field
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
       console.log('[Debug] Arrival triggered')
       hasArrived.value = true
       dismissOverlay()
