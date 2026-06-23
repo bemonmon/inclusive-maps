@@ -99,6 +99,7 @@
 <button
   v-if="routeInfo && !showRoutePreview"
   class="cancel-route-btn"
+  :class="{ 'nav-below-search': searchCollapsed }"
   @click="cancelRoute()"
 >
   ✕ Annulla percorso
@@ -106,11 +107,14 @@
 <div v-if="overlayVisible" class="overlay">
   <div class="overlay-card">
     <div 
-      class="overlay-handle"
+      class="overlay-handle-zone"
       @touchstart="onDragStart"
       @touchmove.prevent="onDragMove"
       @touchend="onDragEnd"
-    ></div>
+      @mousedown="onHandleMouseDown"
+    >
+    <div class="overlay-handle"></div>
+  </div>
     <button class="overlay-close-btn" @click="dismissOverlay()">✕</button>
 
     <Transition v-if="overlayStage === 0" name="fade">
@@ -154,11 +158,14 @@
     <div v-if="rerouteOverlayVisible" class="overlay">
       <div class="overlay-card">
         <div 
-          class="overlay-handle"
+          class="overlay-handle-zone"
           @touchstart="onDragStart"
           @touchmove.prevent="onDragMoveReroute"
           @touchend="onDragEnd"
-        ></div>
+          @mousedown="onHandleMouseDownReroute"
+        >
+          <div class="overlay-handle"></div>
+        </div>
         <button class="overlay-close-btn" @click="dismissRerouteOverlay()">✕</button>
 
         <Transition v-if="rerouteOverlayStage === 0" name="fade">
@@ -579,29 +586,37 @@ function startNavigation() {
 let dragStartY = 0
 let isDragging = false
 
-function onDragStart(e: TouchEvent) {
-  const touch = e.touches[0]
-  if (!touch) return
-  dragStartY = touch.clientY
+function getClientY(e: TouchEvent | MouseEvent): number | null {
+  if ('touches' in e) {
+    const touch = e.touches[0]
+    return touch ? touch.clientY : null
+  }
+  return e.clientY
+}
+
+function onDragStart(e: TouchEvent | MouseEvent) {
+  const y = getClientY(e)
+  if (y === null) return
+  dragStartY = y
   isDragging = true
 }
 
-function onDragMove(e: TouchEvent) {
+function onDragMove(e: TouchEvent | MouseEvent) {
   if (!isDragging) return
-  const touch = e.touches[0]
-  if (!touch) return
-  const deltaY = touch.clientY - dragStartY
+  const y = getClientY(e)
+  if (y === null) return
+  const deltaY = y - dragStartY
   if (deltaY > 80) {
     isDragging = false
     dismissOverlay()
   }
 }
 
-function onDragMoveReroute(e: TouchEvent) {
+function onDragMoveReroute(e: TouchEvent | MouseEvent) {
   if (!isDragging) return
-  const touch = e.touches[0]
-  if (!touch) return
-  const deltaY = touch.clientY - dragStartY
+  const y = getClientY(e)
+  if (y === null) return
+  const deltaY = y - dragStartY
   if (deltaY > 80) {
     isDragging = false
     dismissRerouteOverlay()
@@ -610,6 +625,21 @@ function onDragMoveReroute(e: TouchEvent) {
 
 function onDragEnd() {
   isDragging = false
+  window.removeEventListener('mousemove', onDragMove)
+  window.removeEventListener('mousemove', onDragMoveReroute)
+  window.removeEventListener('mouseup', onDragEnd)
+}
+
+function onHandleMouseDown(e: MouseEvent) {
+  onDragStart(e)
+  window.addEventListener('mousemove', onDragMove)
+  window.addEventListener('mouseup', onDragEnd)
+}
+
+function onHandleMouseDownReroute(e: MouseEvent) {
+  onDragStart(e)
+  window.addEventListener('mousemove', onDragMoveReroute)
+  window.addEventListener('mouseup', onDragEnd)
 }
 // ─── Rerouting ────────────────────────────────────────────────────────────────
 
@@ -1420,6 +1450,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
   box-shadow: 0 4px 12px rgba(0,0,0,0.12);
   white-space: nowrap;
+}
+.cancel-route-btn.nav-below-search {
+  top: 160px; /* 88px base + 72px, same shift as .nav-top.nav-below-search */
 }
 
 .suggestions li:last-child { border-bottom: none; }
