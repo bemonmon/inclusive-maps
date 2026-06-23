@@ -1,6 +1,6 @@
 # Inclusive Maps — Adaptive Navigation Prototype
 
-A mobile-first web application prototype developed as part of a thesis project at **Politecnico di Milano**. The project investigates how adaptive UI overlays can support users with intellectual disabilities during pedestrian navigation, by detecting hesitation at decision points and providing contextual assistance.
+A mobile-first web application prototype developed as part of a course project at **Politecnico di Milano**. The project investigates how adaptive UI overlays can support users with intellectual disabilities during pedestrian navigation, by detecting hesitation at decision points and providing contextual assistance.
 
 Built on open-source technologies as an alternative to Google Maps, using **Vue 3**, **MapLibre GL**, and **OpenStreetMap**-based services.
 
